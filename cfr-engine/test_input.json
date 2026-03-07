@@ -1,0 +1,26 @@
+{
+    "job_id": "test_001",
+    "game": {
+        "stack_size": 100.0,
+        "pot_size": 6.5,
+        "board": ["Qs", "8h", "4d"],
+        "players": {
+            "oop": {
+                "range": "AA,KK,QQ,JJ,TT,AKs,AKo,AQs"
+            },
+            "ip": {
+                "range": "AA,KK,QQ,JJ,TT,AKs,AKo,AQs"
+            }
+        }
+    },
+    "rake": {
+        "percentage": 0.05,
+        "cap": 3.0,
+        "no_flop_no_drop": true
+    },
+    "solve_config": {
+        "max_iterations": 50,
+        "target_exploitability": 0.003,
+        "timeout_seconds": 30
+    }
+}
