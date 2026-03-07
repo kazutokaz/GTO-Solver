@@ -1,0 +1,35 @@
+{
+  "name": "api-server",
+  "version": "1.0.0",
+  "description": "GTO Exploit Solver API Server",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch & node --watch dist/index.js",
+    "worker": "node dist/worker.js",
+    "migrate": "node dist/db/migrate.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/jwt": "^10.0.0",
+    "@fastify/websocket": "^11.2.0",
+    "bullmq": "^5.70.4",
+    "dotenv": "^17.3.1",
+    "fastify": "^5.8.2",
+    "pg": "^8.20.0",
+    "stripe": "^20.4.1",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.5",
+    "@types/pg": "^8.18.0",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  }
+}
