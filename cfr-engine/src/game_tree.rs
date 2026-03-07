@@ -533,6 +533,96 @@ mod tests {
             RakeConfig::default(),
         );
         assert!(!tree.nodes.is_empty());
-        println!("Tree nodes: {}", tree.nodes.len());
+    }
+
+    #[test]
+    fn test_root_is_oop_action() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+        ];
+        let tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+        );
+        // Root should be an OOP action node (OOP acts first postflop)
+        match &tree.nodes[tree.root].kind {
+            NodeKind::Action { player, .. } => assert_eq!(*player, Player::OOP),
+            _ => panic!("Root should be an action node"),
+        }
+    }
+
+    #[test]
+    fn test_root_has_check_action() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+        ];
+        let tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+        );
+        match &tree.nodes[tree.root].kind {
+            NodeKind::Action { actions, .. } => {
+                assert!(actions.iter().any(|a| *a == ActionKind::Check),
+                    "OOP should have check option");
+            }
+            _ => panic!("Root should be an action node"),
+        }
+    }
+
+    #[test]
+    fn test_river_tree() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+            parse_card("Jc").unwrap(),
+            parse_card("2s").unwrap(),
+        ];
+        let tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+        );
+        assert!(!tree.nodes.is_empty());
+        // On river there should be no chance nodes
+        for node in &tree.nodes {
+            if let NodeKind::Chance { .. } = &node.kind {
+                panic!("River tree should have no chance nodes");
+            }
+        }
+    }
+
+    #[test]
+    fn test_rake_config() {
+        let rake = RakeConfig {
+            percentage: 0.05,
+            cap: 3.0,
+            no_flop_no_drop: true,
+        };
+        assert_eq!(rake.percentage, 0.05);
+        assert_eq!(rake.cap, 3.0);
+        assert!(rake.no_flop_no_drop);
+    }
+
+    #[test]
+    fn test_player_opponent() {
+        assert_eq!(Player::OOP.opponent(), Player::IP);
+        assert_eq!(Player::IP.opponent(), Player::OOP);
+    }
+
+    #[test]
+    fn test_action_to_string() {
+        assert_eq!(ActionKind::Fold.to_string(), "fold");
+        assert_eq!(ActionKind::Check.to_string(), "check");
+        assert_eq!(ActionKind::Call.to_string(), "call");
+        assert_eq!(ActionKind::AllIn.to_string(), "allin");
+        assert_eq!(ActionKind::Bet(0.33).to_string(), "bet:0.33");
+        assert_eq!(ActionKind::Raise(2.5).to_string(), "raise:2.50");
     }
 }

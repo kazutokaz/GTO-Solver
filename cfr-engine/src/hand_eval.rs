@@ -244,8 +244,66 @@ mod tests {
             parse_card("7d").unwrap(),
             parse_card("Tc").unwrap(),
         ];
-        let (eq_oo, eq_ip) = compute_equity(oo, ip, &board);
+        let (eq_oo, _eq_ip) = compute_equity(oo, ip, &board);
         // AA should be ~80% vs KK on low board
         assert!(eq_oo > 0.75, "AA equity was {}", eq_oo);
+    }
+
+    #[test]
+    fn test_hand_rankings_order() {
+        let p = |s: &str| parse_card(s).unwrap();
+        // High card < Pair < Two pair < Trips < Straight < Flush < Full house < Quads < Straight flush
+        let high_card = evaluate_5(&[p("2s"), p("4h"), p("6d"), p("8c"), p("Ts")]);
+        let pair = evaluate_5(&[p("2s"), p("2h"), p("6d"), p("8c"), p("Ts")]);
+        let two_pair = evaluate_5(&[p("2s"), p("2h"), p("6d"), p("6c"), p("Ts")]);
+        let trips = evaluate_5(&[p("2s"), p("2h"), p("2d"), p("8c"), p("Ts")]);
+        let straight = evaluate_5(&[p("5s"), p("6h"), p("7d"), p("8c"), p("9s")]);
+        let flush = evaluate_5(&[p("2s"), p("4s"), p("6s"), p("8s"), p("Ts")]);
+        let full_house = evaluate_5(&[p("2s"), p("2h"), p("2d"), p("8c"), p("8s")]);
+        let quads = evaluate_5(&[p("2s"), p("2h"), p("2d"), p("2c"), p("Ts")]);
+        let str_flush = evaluate_5(&[p("5s"), p("6s"), p("7s"), p("8s"), p("9s")]);
+
+        assert!(high_card < pair);
+        assert!(pair < two_pair);
+        assert!(two_pair < trips);
+        assert!(trips < straight);
+        assert!(straight < flush);
+        assert!(flush < full_house);
+        assert!(full_house < quads);
+        assert!(quads < str_flush);
+    }
+
+    #[test]
+    fn test_wheel_straight() {
+        let p = |s: &str| parse_card(s).unwrap();
+        let wheel = evaluate_5(&[p("As"), p("2h"), p("3d"), p("4c"), p("5s")]);
+        assert_eq!(wheel >> 20, 4); // straight category
+        // Wheel should be lower than 6-high straight
+        let six_high = evaluate_5(&[p("2s"), p("3h"), p("4d"), p("5c"), p("6s")]);
+        assert!(wheel < six_high);
+    }
+
+    #[test]
+    fn test_best_hand_7_cards() {
+        let p = |s: &str| parse_card(s).unwrap();
+        // Full board: hole = AA, board has A + two pair → should make full house
+        let hole = [p("Ah"), p("As")];
+        let board = vec![p("Ad"), p("Kh"), p("Kd"), p("7c"), p("2s")];
+        let score = best_hand(hole, &board);
+        assert_eq!(score >> 20, 6); // full house
+    }
+
+    #[test]
+    fn test_showdown_river_exact() {
+        let p = |s: &str| parse_card(s).unwrap();
+        let h1 = [p("Ah"), p("Kh")];
+        let h2 = [p("Qh"), p("Jh")];
+        let board = vec![p("2s"), p("5d"), p("9c"), p("Th"), p("3h")];
+        // Both have flush draws but only with hearts on board
+        // h1: Ah Kh + Th 3h = A-high flush
+        // h2: Qh Jh + Th 3h = Q-high flush
+        let (eq1, eq2) = compute_equity(h1, h2, &board);
+        assert_eq!(eq1, 1.0); // AK flush beats QJ flush
+        assert_eq!(eq2, 0.0);
     }
 }

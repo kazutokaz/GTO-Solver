@@ -207,4 +207,64 @@ mod tests {
             assert_ne!(hand[1], parse_card("Ah").unwrap());
         }
     }
+
+    #[test]
+    fn test_parse_complex_range() {
+        // Multiple components separated by commas
+        let r = parse_range("AA,KK,QQ");
+        assert_eq!(r.len(), 18); // 6+6+6
+    }
+
+    #[test]
+    fn test_parse_specific_hand() {
+        // Specific suited combo like AhKh
+        let r = parse_range("AhKh");
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_mixed_freq() {
+        // Different frequencies for different parts
+        let r = parse_range("AA:1.0,KK:0.5");
+        let aa_count = r.iter().filter(|&(&h, _)| {
+            crate::cards::rank(h[0]) == 12 && crate::cards::rank(h[1]) == 12
+        }).count();
+        let kk_freqs: Vec<f64> = r.iter().filter(|&(&h, _)| {
+            crate::cards::rank(h[0]) == 11 && crate::cards::rank(h[1]) == 11
+        }).map(|(_, &f)| f).collect();
+        assert_eq!(aa_count, 6);
+        assert_eq!(kk_freqs.len(), 6);
+        for f in kk_freqs {
+            assert_eq!(f, 0.5);
+        }
+    }
+
+    #[test]
+    fn test_empty_range() {
+        let r = parse_range("");
+        assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_removes_conflicting() {
+        use crate::cards::parse_card;
+        // KK with Kd on board should lose combos containing Kd
+        let r = parse_range("KK");
+        assert_eq!(r.len(), 6);
+        let board = vec![
+            parse_card("Kd").unwrap(),
+            parse_card("7s").unwrap(),
+            parse_card("2h").unwrap(),
+        ];
+        let filtered = filter_range_for_board(&r, &board);
+        // 3 combos remain (KhKs, KhKc, KsKc)
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn test_range_total() {
+        let r = parse_range("AA:0.5");
+        let total = range_total(&r);
+        assert!((total - 3.0).abs() < 0.001); // 6 combos * 0.5 = 3.0
+    }
 }
