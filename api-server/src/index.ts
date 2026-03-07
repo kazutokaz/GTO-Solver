@@ -7,6 +7,7 @@ import { authRoutes } from './routes/auth';
 import { solveRoutes } from './routes/solve';
 import { userRoutes } from './routes/user';
 import { billingRoutes } from './routes/billing';
+import { aggregateRoutes } from './routes/aggregate';
 import { websocketRoutes } from './routes/websocket';
 import { authPlugin } from './services/auth';
 
@@ -35,6 +36,7 @@ async function main() {
   await app.register(solveRoutes);
   await app.register(userRoutes);
   await app.register(billingRoutes);
+  await app.register(aggregateRoutes);
   await app.register(websocketRoutes);
 
   // Health check

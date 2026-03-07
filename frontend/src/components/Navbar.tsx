@@ -22,6 +22,9 @@ export function Navbar() {
             <Link to="/app/solve" className="text-sm no-underline" style={{ color: 'var(--text-primary)' }}>
               Solve
             </Link>
+            <Link to="/app/aggregate" className="text-sm no-underline" style={{ color: 'var(--text-primary)' }}>
+              Aggregate
+            </Link>
             <Link to="/app/history" className="text-sm no-underline" style={{ color: 'var(--text-primary)' }}>
               History
             </Link>

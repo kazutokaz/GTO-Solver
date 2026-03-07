@@ -7,6 +7,7 @@ import { SignupPage } from './pages/SignupPage';
 import { SolvePage } from './pages/SolvePage';
 import { HistoryPage } from './pages/HistoryPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { AggregatePage } from './pages/AggregatePage';
 import { useAuthStore } from './store/authStore';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -30,6 +31,7 @@ export function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/app/solve" element={<ProtectedRoute><SolvePage /></ProtectedRoute>} />
+        <Route path="/app/aggregate" element={<ProtectedRoute><AggregatePage /></ProtectedRoute>} />
         <Route path="/app/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
         <Route path="/app/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
       </Routes>
