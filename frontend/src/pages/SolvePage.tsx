@@ -1,13 +1,17 @@
 import { RangeEditor } from '../components/RangeEditor';
 import { BoardPicker } from '../components/BoardPicker';
+import { BetSizeConfig } from '../components/BetSizeConfig';
+import { RakeConfig } from '../components/RakeConfig';
 import { StrategyMatrix } from '../components/StrategyMatrix';
+import { GameTreeNav } from '../components/GameTreeNav';
 import { useSolveStore } from '../store/solveStore';
 
 export function SolvePage() {
   const {
-    stackSize, potSize, board, oopRange, ipRange,
+    stackSize, potSize, board, oopRange, ipRange, betSizes, rake,
     status, result, error, jobId,
     setBoard, setOopRange, setIpRange, setStackSize, setPotSize,
+    setBetSizes, setRake,
     submitSolve, reset,
   } = useSolveStore();
 
@@ -49,6 +53,12 @@ export function SolvePage() {
           <div className="grid grid-cols-2 gap-4">
             <RangeEditor value={oopRange} onChange={setOopRange} label="OOP Range" />
             <RangeEditor value={ipRange} onChange={setIpRange} label="IP Range" />
+          </div>
+
+          {/* Bet Sizes & Rake */}
+          <div className="flex flex-col gap-2">
+            <BetSizeConfig value={betSizes} onChange={setBetSizes} />
+            <RakeConfig value={rake} onChange={setRake} />
           </div>
 
           {/* Submit */}
@@ -109,12 +119,21 @@ export function SolvePage() {
               {result.result && (
                 <div>
                   <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
-                    Root Strategy ({result.result.player?.toUpperCase()})
+                    Game Tree
                   </h3>
-                  <StrategyMatrix
-                    strategy={result.result.strategy || {}}
-                    actions={result.result.actions || []}
-                  />
+                  {result.result.children ? (
+                    <GameTreeNav root={result.result} />
+                  ) : (
+                    <>
+                      <div className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
+                        Root Strategy ({result.result.player?.toUpperCase()})
+                      </div>
+                      <StrategyMatrix
+                        strategy={result.result.strategy || {}}
+                        actions={result.result.actions || []}
+                      />
+                    </>
+                  )}
                 </div>
               )}
             </div>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { StrategyMatrix } from '../components/StrategyMatrix';
+import { GameTreeNav } from '../components/GameTreeNav';
 import { api } from '../api/client';
 
 export function SolveResultPage() {
@@ -86,12 +87,21 @@ export function SolveResultPage() {
           {data.result && (
             <div>
               <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
-                Root Strategy ({data.result.player?.toUpperCase()})
+                Game Tree
               </h3>
-              <StrategyMatrix
-                strategy={data.result.strategy || {}}
-                actions={data.result.actions || []}
-              />
+              {data.result.children ? (
+                <GameTreeNav root={data.result} />
+              ) : (
+                <>
+                  <div className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
+                    Root Strategy ({data.result.player?.toUpperCase()})
+                  </div>
+                  <StrategyMatrix
+                    strategy={data.result.strategy || {}}
+                    actions={data.result.actions || []}
+                  />
+                </>
+              )}
             </div>
           )}
         </div>

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import type { FullBetSizeConfig } from '../components/BetSizeConfig';
+import type { RakeSettings } from '../components/RakeConfig';
 
 interface SolveState {
   // Input
@@ -8,6 +10,8 @@ interface SolveState {
   board: string[];
   oopRange: string;
   ipRange: string;
+  betSizes: FullBetSizeConfig | null;
+  rake: RakeSettings | null;
 
   // Result
   jobId: string | null;
@@ -21,6 +25,8 @@ interface SolveState {
   setIpRange: (range: string) => void;
   setStackSize: (size: number) => void;
   setPotSize: (size: number) => void;
+  setBetSizes: (config: FullBetSizeConfig | null) => void;
+  setRake: (config: RakeSettings | null) => void;
   submitSolve: () => Promise<void>;
   pollResult: (jobId: string) => Promise<void>;
   reset: () => void;
@@ -32,6 +38,8 @@ export const useSolveStore = create<SolveState>((set, get) => ({
   board: [],
   oopRange: '',
   ipRange: '',
+  betSizes: null,
+  rake: null,
 
   jobId: null,
   status: 'idle',
@@ -43,14 +51,18 @@ export const useSolveStore = create<SolveState>((set, get) => ({
   setIpRange: (range) => set({ ipRange: range }),
   setStackSize: (size) => set({ stackSize: size }),
   setPotSize: (size) => set({ potSize: size }),
+  setBetSizes: (config) => set({ betSizes: config }),
+  setRake: (config) => set({ rake: config }),
 
   submitSolve: async () => {
-    const { stackSize, potSize, board, oopRange, ipRange } = get();
+    const { stackSize, potSize, board, oopRange, ipRange, betSizes, rake } = get();
     set({ status: 'queued', error: null, result: null });
 
     try {
       const { jobId } = await api.submitSolve({
         game: { stackSize, potSize, board, oopRange, ipRange },
+        betSizes: betSizes || undefined,
+        rake: rake || undefined,
       });
       set({ jobId, status: 'queued' });
 
