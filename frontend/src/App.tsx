@@ -8,7 +8,10 @@ import { SolvePage } from './pages/SolvePage';
 import { HistoryPage } from './pages/HistoryPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { AggregatePage } from './pages/AggregatePage';
+import { SolveResultPage } from './pages/SolveResultPage';
+import { AggregateResultPage } from './pages/AggregateResultPage';
 import { useAuthStore } from './store/authStore';
+import { useWebSocket } from './hooks/useWebSocket';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -23,6 +26,9 @@ export function App() {
     loadFromStorage();
   }, [loadFromStorage]);
 
+  // Connect WebSocket for real-time notifications
+  useWebSocket();
+
   return (
     <BrowserRouter>
       <Navbar />
@@ -31,7 +37,9 @@ export function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/app/solve" element={<ProtectedRoute><SolvePage /></ProtectedRoute>} />
+        <Route path="/app/solve/:id" element={<ProtectedRoute><SolveResultPage /></ProtectedRoute>} />
         <Route path="/app/aggregate" element={<ProtectedRoute><AggregatePage /></ProtectedRoute>} />
+        <Route path="/app/aggregate/:id" element={<ProtectedRoute><AggregateResultPage /></ProtectedRoute>} />
         <Route path="/app/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
         <Route path="/app/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
       </Routes>

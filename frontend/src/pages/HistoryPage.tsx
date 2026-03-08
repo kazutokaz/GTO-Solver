@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 
 export function HistoryPage() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
 
   useEffect(() => {
     api.getHistory().then(data => {
@@ -36,7 +37,8 @@ export function HistoryPage() {
           </thead>
           <tbody>
             {jobs.map(job => (
-              <tr key={job.id} style={{ borderBottom: '1px solid #222' }}>
+              <tr key={job.id} style={{ borderBottom: '1px solid #222', cursor: 'pointer' }}
+                onClick={() => navigate(`/app/solve/${job.id}`)}>
                 <td className="py-2">{new Date(job.created_at).toLocaleString()}</td>
                 <td className="py-2">
                   <span className="px-2 py-0.5 rounded text-xs" style={{
