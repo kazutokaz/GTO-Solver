@@ -57,6 +57,7 @@ fn main() {
     let bet_sizes = convert_bet_sizes(input.bet_sizes);
     let rake = convert_rake(input.rake);
     let node_locks = convert_node_locks(input.node_locks);
+    let board_len = board.len();
 
     let mut tree = GameTree::build(
         input.game.stack_size,
@@ -66,7 +67,7 @@ fn main() {
         rake,
     );
 
-    tree.apply_node_locks(&node_locks);
+    let locked_node_ids = tree.apply_node_locks(&node_locks);
 
     // Solve config
     let solve_cfg = input.solve_config.unwrap_or(io::SolveConfigInput {
@@ -80,30 +81,45 @@ fn main() {
 
     // Run solver
     let mut solver = Solver::new(tree, oop_range, ip_range);
-    let check_interval = 100u32;
+    solver.set_user_locked_nodes(locked_node_ids.clone());
 
-    loop {
-        solver.iterate();
-
-        let elapsed = start.elapsed().as_secs();
-        if elapsed >= timeout_secs {
-            eprintln!("Timeout reached after {} iterations", solver.iteration);
-            break;
+    // Detect if chained nodelock is needed (locks on downstream streets)
+    let has_downstream_locks = node_locks.iter().any(|lock| {
+        match (board_len, lock.street.as_str()) {
+            (3, "turn") | (3, "river") | (4, "river") => true,
+            _ => false,
         }
+    });
 
-        if solver.iteration >= max_iterations {
-            break;
-        }
+    if has_downstream_locks {
+        let iters_per_phase = (max_iterations / 3).max(50);
+        eprintln!("Using chained nodelock solve ({} iters/phase, 3 rounds)", iters_per_phase);
+        solver.solve_with_chained_nodelock(iters_per_phase, 3);
+    } else {
+        let check_interval = 100u32;
+        loop {
+            solver.iterate();
 
-        if solver.iteration % check_interval == 0 {
-            let exploitability = solver.compute_exploitability();
-            eprintln!(
-                "Iteration {}: exploitability = {:.6}",
-                solver.iteration, exploitability
-            );
-            if exploitability <= target_exploitability {
-                eprintln!("Converged!");
+            let elapsed = start.elapsed().as_secs();
+            if elapsed >= timeout_secs {
+                eprintln!("Timeout reached after {} iterations", solver.iteration);
                 break;
+            }
+
+            if solver.iteration >= max_iterations {
+                break;
+            }
+
+            if solver.iteration % check_interval == 0 {
+                let exploitability = solver.compute_exploitability();
+                eprintln!(
+                    "Iteration {}: exploitability = {:.6}",
+                    solver.iteration, exploitability
+                );
+                if exploitability <= target_exploitability {
+                    eprintln!("Converged!");
+                    break;
+                }
             }
         }
     }

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::cards::{Card, parse_card};
+use crate::cards::{Card, parse_card, parse_hand};
 use crate::ranges::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +143,7 @@ pub enum NodeKind {
         actions: Vec<ActionKind>,
         children: Vec<usize>, // child node IDs
         node_locked: bool,
-        locked_strategy: Option<Vec<f64>>,
+        locked_strategy: Option<HashMap<[Card; 2], Vec<f64>>>,
     },
     /// Terminal: showdown or fold
     Terminal {
@@ -508,10 +508,52 @@ impl GameTree {
         actions
     }
 
-    pub fn apply_node_locks(&mut self, locks: &[NodeLockEntry]) {
-        // For now, apply locks by action path matching (simplified)
-        // Full implementation would traverse the tree matching action paths
-        // This is a placeholder that will be expanded in the CFR solver
+    pub fn apply_node_locks(&mut self, locks: &[NodeLockEntry]) -> Vec<usize> {
+        let mut locked_ids = Vec::new();
+        for lock in locks {
+            if let Some(node_id) = self.find_node_by_path(&lock.action_path) {
+                let mut strategies: HashMap<[Card; 2], Vec<f64>> = HashMap::new();
+                for (hand_str, strat) in &lock.hand_strategies {
+                    if let Some(hand) = parse_hand(hand_str) {
+                        strategies.insert(hand, strat.clone());
+                    }
+                }
+                if let NodeKind::Action { ref mut node_locked, ref mut locked_strategy, .. } = self.nodes[node_id].kind {
+                    *node_locked = true;
+                    *locked_strategy = Some(strategies);
+                    locked_ids.push(node_id);
+                }
+            }
+        }
+        locked_ids
+    }
+
+    /// Walk the game tree following an action path, skipping Chance nodes.
+    /// Returns the node ID reached after consuming all actions.
+    pub fn find_node_by_path(&self, action_path: &[String]) -> Option<usize> {
+        let mut current = self.root;
+        for action_name in action_path {
+            current = self.skip_chance(current);
+            match &self.nodes[current].kind {
+                NodeKind::Action { actions, children, .. } => {
+                    let idx = actions.iter().position(|a| a.to_string() == *action_name)?;
+                    current = children[idx];
+                }
+                _ => return None,
+            }
+        }
+        current = self.skip_chance(current);
+        Some(current)
+    }
+
+    /// If node_id is a Chance node, return its first child; otherwise return node_id.
+    fn skip_chance(&self, node_id: usize) -> usize {
+        match &self.nodes[node_id].kind {
+            NodeKind::Chance { children, .. } => {
+                children.first().map(|(_, child)| *child).unwrap_or(node_id)
+            }
+            _ => node_id,
+        }
     }
 }
 
@@ -624,5 +666,62 @@ mod tests {
         assert_eq!(ActionKind::AllIn.to_string(), "allin");
         assert_eq!(ActionKind::Bet(0.33).to_string(), "bet:0.33");
         assert_eq!(ActionKind::Raise(2.5).to_string(), "raise:2.50");
+    }
+
+    #[test]
+    fn test_find_node_by_path_check_check_to_turn() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+        ];
+        let tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+        );
+        // check-check on flop should reach Turn OOP Action node
+        let node_id = tree.find_node_by_path(&[
+            "check".to_string(), "check".to_string()
+        ]);
+        assert!(node_id.is_some(), "Should find node after check-check");
+        let nid = node_id.unwrap();
+        match &tree.nodes[nid].kind {
+            NodeKind::Action { player, street, .. } => {
+                assert_eq!(*player, Player::OOP);
+                assert_eq!(*street, Street::Turn);
+            }
+            _ => panic!("Expected Turn OOP Action node"),
+        }
+    }
+
+    #[test]
+    fn test_apply_node_locks_by_path() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+        ];
+        let mut tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+        );
+        let lock = NodeLockEntry {
+            action_path: vec!["check".to_string(), "check".to_string()],
+            street: "turn".to_string(),
+            player: "oop".to_string(),
+            hand_strategies: HashMap::new(),
+        };
+        let locked = tree.apply_node_locks(&[lock]);
+        assert_eq!(locked.len(), 1);
+        let nid = locked[0];
+        match &tree.nodes[nid].kind {
+            NodeKind::Action { node_locked, street, .. } => {
+                assert!(*node_locked);
+                assert_eq!(*street, Street::Turn);
+            }
+            _ => panic!("Expected Action node"),
+        }
     }
 }
