@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { PRESETS } from '../data/rangePresets';
 
 const RANKS = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
 
@@ -33,6 +34,14 @@ export function RangeEditor({ value, onChange, label }: RangeEditorProps) {
   const dragMode = useRef<'select' | 'deselect'>('select');
   const [textMode, setTextMode] = useState(false);
   const [textValue, setTextValue] = useState(value);
+  const [showPresets, setShowPresets] = useState(false);
+
+  const loadPreset = (range: string) => {
+    onChange(range);
+    setSelected(parseRange(range));
+    setTextValue(range);
+    setShowPresets(false);
+  };
 
   const toggleCell = useCallback((label: string) => {
     setSelected(prev => {
@@ -92,7 +101,33 @@ export function RangeEditor({ value, onChange, label }: RangeEditorProps) {
         >
           {textMode ? 'Grid' : 'Text'}
         </button>
+        <button
+          className="text-xs px-2 py-0.5 rounded"
+          style={{ background: showPresets ? 'var(--accent)' : 'var(--bg-secondary)', color: showPresets ? '#fff' : 'var(--text-primary)' }}
+          onClick={() => setShowPresets(!showPresets)}
+        >
+          Presets
+        </button>
       </div>
+
+      {showPresets && (
+        <div className="p-2 rounded mb-2 text-xs" style={{ background: 'var(--bg-secondary)' }}>
+          {Object.entries(PRESETS).map(([group, presets]) => (
+            <div key={group} className="mb-2">
+              <div className="font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>{group}</div>
+              <div className="flex gap-1 flex-wrap">
+                {presets.map(p => (
+                  <button key={p.name} className="px-2 py-0.5 rounded"
+                    style={{ background: 'var(--bg-card)', color: 'var(--text-primary)' }}
+                    onClick={() => loadPreset(p.range)}>
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {textMode ? (
         <textarea
