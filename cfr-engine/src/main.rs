@@ -53,6 +53,18 @@ fn main() {
     let oop_range = parse_range(&input.game.players.oop.range);
     let ip_range = parse_range(&input.game.players.ip.range);
 
+    // Parse turn/river cards
+    let turn_cards: Vec<cards::Card> = input.game.turn_cards
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| parse_card(s))
+        .collect();
+    let river_cards: Vec<cards::Card> = input.game.river_cards
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| parse_card(s))
+        .collect();
+
     // Build game tree
     let bet_sizes = convert_bet_sizes(input.bet_sizes);
     let rake = convert_rake(input.rake);
@@ -65,7 +77,28 @@ fn main() {
         board,
         bet_sizes,
         rake,
+        turn_cards,
+        river_cards,
     );
+
+    // Debug: print tree stats
+    {
+        let mut n_action = 0;
+        let mut n_terminal = 0;
+        let mut n_chance = 0;
+        for node in &tree.nodes {
+            match &node.kind {
+                game_tree::NodeKind::Action { .. } => n_action += 1,
+                game_tree::NodeKind::Terminal { .. } => n_terminal += 1,
+                game_tree::NodeKind::Chance { children, street, .. } => {
+                    n_chance += 1;
+                    eprintln!("Chance node: street={:?}, children={}", street, children.len());
+                }
+            }
+        }
+        eprintln!("Tree: {} action, {} terminal, {} chance = {} total nodes",
+            n_action, n_terminal, n_chance, tree.nodes.len());
+    }
 
     let locked_node_ids = tree.apply_node_locks(&node_locks);
 
@@ -98,7 +131,13 @@ fn main() {
     } else {
         let check_interval = 100u32;
         loop {
+            let iter_start = Instant::now();
             solver.iterate();
+            let iter_ms = iter_start.elapsed().as_millis();
+
+            if solver.iteration <= 3 || solver.iteration % check_interval == 0 {
+                eprintln!("Iteration {} done in {}ms", solver.iteration, iter_ms);
+            }
 
             let elapsed = start.elapsed().as_secs();
             if elapsed >= timeout_secs {

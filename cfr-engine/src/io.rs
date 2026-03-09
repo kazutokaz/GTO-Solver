@@ -21,6 +21,8 @@ pub struct GameConfig {
     pub pot_size: f64,
     pub board: Vec<String>,
     pub street: Option<String>,
+    pub turn_cards: Option<Vec<String>>,
+    pub river_cards: Option<Vec<String>>,
     pub players: PlayersConfig,
 }
 

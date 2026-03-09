@@ -150,6 +150,8 @@ pub enum NodeKind {
         street: Street,
         winner: TerminalWinner,
         pot: f64,
+        invested_oop: f64,
+        invested_ip: f64,
         saw_flop: bool,
     },
     /// Chance node: dealing a card
@@ -181,6 +183,8 @@ pub struct GameTree {
     pub board: Vec<Card>,
     pub bet_sizes: FullBetSizeConfig,
     pub rake: RakeConfig,
+    pub turn_cards: Vec<Card>,
+    pub river_cards: Vec<Card>,
 }
 
 impl GameTree {
@@ -190,6 +194,8 @@ impl GameTree {
         board: Vec<Card>,
         bet_sizes: FullBetSizeConfig,
         rake: RakeConfig,
+        turn_cards: Vec<Card>,
+        river_cards: Vec<Card>,
     ) -> Self {
         let mut tree = GameTree {
             nodes: Vec::new(),
@@ -199,6 +205,8 @@ impl GameTree {
             board: board.clone(),
             bet_sizes,
             rake,
+            turn_cards,
+            river_cards,
         };
 
         let street = match board.len() {
@@ -251,6 +259,8 @@ impl GameTree {
                 street,
                 winner: TerminalWinner::Showdown,
                 pot,
+                invested_oop: self.stacks - stack_oop,
+                invested_ip: self.stacks - stack_ip,
                 saw_flop,
             });
         }
@@ -321,6 +331,8 @@ impl GameTree {
                     street,
                     winner,
                     pot,
+                    invested_oop: self.stacks - stack_oop,
+                    invested_ip: self.stacks - stack_ip,
                     saw_flop,
                 })
             }
@@ -401,37 +413,74 @@ impl GameTree {
                     street,
                     winner: TerminalWinner::Showdown,
                     pot,
+                    invested_oop: self.stacks - stack_oop,
+                    invested_ip: self.stacks - stack_ip,
                     saw_flop,
                 })
             }
-            Street::Flop | Street::Turn => {
-                let next_street = if street == Street::Flop { Street::Turn } else { Street::River };
-                // Chance node for the next card
-                let chance_id = self.nodes.len();
-                self.nodes.push(TreeNode {
-                    id: chance_id,
-                    kind: NodeKind::Chance {
-                        street: next_street,
-                        children: vec![],
-                    },
-                });
-
-                // Build one representative subtree per runout card
-                // (actual card dealt during solve time via card removal)
-                let action_child = self.build_node(
-                    Player::OOP, next_street, pot, stack_ip, stack_oop,
-                    0.0, false, true, true,
-                );
-
-                // For tree structure, use a placeholder single child
-                // The CFR engine handles card dealing via reach probability scaling
-                if let NodeKind::Chance { children: ref mut ch, .. } = self.nodes[chance_id].kind {
-                    // Use card 0 as placeholder; actual dealing handled in solver
-                    ch.push((0, action_child));
+            Street::Flop => {
+                if self.turn_cards.is_empty() {
+                    // No turn cards: terminate at flop showdown
+                    return self.alloc_node(NodeKind::Terminal {
+                        street,
+                        winner: TerminalWinner::Showdown,
+                        pot,
+                        invested_oop: self.stacks - stack_oop,
+                        invested_ip: self.stacks - stack_ip,
+                        saw_flop,
+                    });
                 }
-                chance_id
+                let cards = self.turn_cards.clone();
+                self.build_chance_node(Street::Turn, &cards, pot, stack_ip, stack_oop)
+            }
+            Street::Turn => {
+                if self.river_cards.is_empty() {
+                    // No river cards: terminate at turn showdown
+                    return self.alloc_node(NodeKind::Terminal {
+                        street,
+                        winner: TerminalWinner::Showdown,
+                        pot,
+                        invested_oop: self.stacks - stack_oop,
+                        invested_ip: self.stacks - stack_ip,
+                        saw_flop,
+                    });
+                }
+                let cards = self.river_cards.clone();
+                self.build_chance_node(Street::River, &cards, pot, stack_ip, stack_oop)
             }
         }
+    }
+
+    fn build_chance_node(
+        &mut self,
+        next_street: Street,
+        cards: &[Card],
+        pot: f64,
+        stack_ip: f64,
+        stack_oop: f64,
+    ) -> usize {
+        let chance_id = self.nodes.len();
+        self.nodes.push(TreeNode {
+            id: chance_id,
+            kind: NodeKind::Chance {
+                street: next_street,
+                children: vec![],
+            },
+        });
+
+        let mut chance_children = Vec::new();
+        for &card in cards {
+            let action_child = self.build_node(
+                Player::OOP, next_street, pot, stack_ip, stack_oop,
+                0.0, false, true, true,
+            );
+            chance_children.push((card, action_child));
+        }
+
+        if let NodeKind::Chance { children: ref mut ch, .. } = self.nodes[chance_id].kind {
+            *ch = chance_children;
+        }
+        chance_id
     }
 
     fn get_actions(
@@ -573,6 +622,8 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![parse_card("Ah").unwrap()],
+            vec![parse_card("2s").unwrap()],
         );
         assert!(!tree.nodes.is_empty());
     }
@@ -588,8 +639,9 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![parse_card("Ah").unwrap()],
+            vec![],
         );
-        // Root should be an OOP action node (OOP acts first postflop)
         match &tree.nodes[tree.root].kind {
             NodeKind::Action { player, .. } => assert_eq!(*player, Player::OOP),
             _ => panic!("Root should be an action node"),
@@ -607,6 +659,7 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![], vec![],
         );
         match &tree.nodes[tree.root].kind {
             NodeKind::Action { actions, .. } => {
@@ -630,14 +683,66 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![], vec![],
         );
         assert!(!tree.nodes.is_empty());
-        // On river there should be no chance nodes
         for node in &tree.nodes {
             if let NodeKind::Chance { .. } = &node.kind {
                 panic!("River tree should have no chance nodes");
             }
         }
+    }
+
+    #[test]
+    fn test_flop_only_no_turn_cards() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+        ];
+        let tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+            vec![], vec![],
+        );
+        // No chance nodes when turn_cards is empty
+        for node in &tree.nodes {
+            if let NodeKind::Chance { .. } = &node.kind {
+                panic!("Flop-only tree should have no chance nodes");
+            }
+        }
+    }
+
+    #[test]
+    fn test_multi_turn_cards() {
+        let board = vec![
+            parse_card("Qs").unwrap(),
+            parse_card("8h").unwrap(),
+            parse_card("4d").unwrap(),
+        ];
+        let turn_cards = vec![
+            parse_card("Ah").unwrap(),
+            parse_card("7c").unwrap(),
+            parse_card("2d").unwrap(),
+        ];
+        let tree = GameTree::build(
+            100.0, 6.5, board,
+            FullBetSizeConfig::default(),
+            RakeConfig::default(),
+            turn_cards, vec![],
+        );
+        // Should have a Chance node with 3 children for Turn
+        let mut found_chance = false;
+        for node in &tree.nodes {
+            if let NodeKind::Chance { street, children, .. } = &node.kind {
+                if *street == Street::Turn {
+                    assert_eq!(children.len(), 3);
+                    found_chance = true;
+                }
+            }
+        }
+        assert!(found_chance, "Should have a Turn chance node");
     }
 
     #[test]
@@ -679,8 +784,9 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![parse_card("Ah").unwrap()],
+            vec![parse_card("2s").unwrap()],
         );
-        // check-check on flop should reach Turn OOP Action node
         let node_id = tree.find_node_by_path(&[
             "check".to_string(), "check".to_string()
         ]);
@@ -706,6 +812,8 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![parse_card("Ah").unwrap()],
+            vec![parse_card("2s").unwrap()],
         );
         let lock = NodeLockEntry {
             action_path: vec!["check".to_string(), "check".to_string()],

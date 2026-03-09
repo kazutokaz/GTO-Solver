@@ -5,8 +5,10 @@
 /// Each player has a range of hands. The strategy is stored per hand per node.
 
 use std::collections::HashMap;
+use dashmap::DashMap;
+use rayon::prelude::*;
 use crate::cards::{Card, card_bit};
-use crate::game_tree::{GameTree, NodeKind, Player, Street, TerminalWinner, RakeConfig};
+use crate::game_tree::{GameTree, NodeKind, Player, Street, TerminalWinner};
 use crate::hand_eval::best_hand;
 use crate::ranges::{Range, normalize};
 
@@ -21,16 +23,13 @@ type InfoKey = (usize, [Card; 2]);
 pub struct InfoSetData {
     pub cumulative_regrets: Vec<f64>,
     pub cumulative_strategy: Vec<f64>,
-    pub current_strategy: Vec<f64>,
 }
 
 impl InfoSetData {
     pub fn new(n_actions: usize) -> Self {
-        let uniform = vec![1.0 / n_actions as f64; n_actions];
         InfoSetData {
             cumulative_regrets: vec![0.0; n_actions],
             cumulative_strategy: vec![0.0; n_actions],
-            current_strategy: uniform,
         }
     }
 
@@ -46,24 +45,108 @@ impl InfoSetData {
     }
 }
 
+/// Compact board key for score cache lookup (7 bytes, 0xFF-padded)
+fn board_to_key(board: &[Card]) -> [Card; 7] {
+    let mut key = [0xFF; 7];
+    key[..board.len()].copy_from_slice(board);
+    key
+}
+
+/// O(n log n) showdown EV for a single traverser hand against opponent reach vector.
+/// Sort opponents by hand strength, then use cumulative sums to compute EV.
+fn showdown_ev_sorted(
+    t_score: u32,
+    opp_reach: &[([Card; 2], f64)],
+    half_pot: f64,
+    scores: Option<&HashMap<[Card; 2], u32>>,
+    board: &[Card],
+) -> f64 {
+    let mut opp_scored: Vec<(u32, f64)> = Vec::with_capacity(opp_reach.len());
+    for &(hand, reach) in opp_reach {
+        if reach <= 0.0 { continue; }
+        let score = scores.and_then(|s| s.get(&hand).copied())
+            .unwrap_or_else(|| best_hand(hand, board));
+        opp_scored.push((score, reach));
+    }
+
+    if opp_scored.is_empty() { return 0.0; }
+
+    opp_scored.sort_unstable_by_key(|&(s, _)| s);
+
+    let lo = opp_scored.partition_point(|&(s, _)| s < t_score);
+    let hi = opp_scored.partition_point(|&(s, _)| s <= t_score);
+
+    let reach_below: f64 = opp_scored[..lo].iter().map(|&(_, r)| r).sum();
+    let reach_above: f64 = opp_scored[hi..].iter().map(|&(_, r)| r).sum();
+
+    half_pot * (reach_below - reach_above)
+}
+
+/// Collect all unique boards that have showdown terminals
+fn collect_showdown_boards(tree: &GameTree, node_id: usize, board: &[Card], out: &mut Vec<Vec<Card>>) {
+    match &tree.nodes[node_id].kind {
+        NodeKind::Terminal { winner: TerminalWinner::Showdown, .. } => {
+            out.push(board.to_vec());
+        }
+        NodeKind::Terminal { .. } => {}
+        NodeKind::Action { children, .. } => {
+            for &cid in children { collect_showdown_boards(tree, cid, board, out); }
+        }
+        NodeKind::Chance { children, .. } => {
+            for &(card, cid) in children {
+                let mut nb = board.to_vec();
+                nb.push(card);
+                collect_showdown_boards(tree, cid, &nb, out);
+            }
+        }
+    }
+}
+
+/// Precompute best_hand scores for all hands on all unique boards
+fn precompute_hand_scores(
+    tree: &GameTree, oop_range: &Range, ip_range: &Range,
+) -> HashMap<[Card; 7], HashMap<[Card; 2], u32>> {
+    let mut boards = Vec::new();
+    collect_showdown_boards(tree, tree.root, &tree.board, &mut boards);
+    boards.sort();
+    boards.dedup();
+
+    let mut cache = HashMap::new();
+    for board in &boards {
+        let board_mask: u64 = board.iter().fold(0u64, |m, &c| card_bit(c) | m);
+        let mut scores: HashMap<[Card; 2], u32> = HashMap::new();
+        for (&hand, _) in oop_range.iter().chain(ip_range.iter()) {
+            if scores.contains_key(&hand) { continue; }
+            if card_bit(hand[0]) & board_mask != 0 { continue; }
+            if card_bit(hand[1]) & board_mask != 0 { continue; }
+            scores.insert(hand, best_hand(hand, board));
+        }
+        cache.insert(board_to_key(board), scores);
+    }
+    cache
+}
+
 pub struct Solver {
     pub game_tree: GameTree,
     pub oop_range: Range,
     pub ip_range: Range,
-    pub info_sets: HashMap<InfoKey, InfoSetData>,
+    pub info_sets: DashMap<InfoKey, InfoSetData>,
     pub iteration: u32,
     pub user_locked_nodes: Vec<usize>,
+    score_cache: HashMap<[Card; 7], HashMap<[Card; 2], u32>>,
 }
 
 impl Solver {
     pub fn new(game_tree: GameTree, oop_range: Range, ip_range: Range) -> Self {
+        let score_cache = precompute_hand_scores(&game_tree, &oop_range, &ip_range);
         Solver {
             game_tree,
             oop_range,
             ip_range,
-            info_sets: HashMap::new(),
+            info_sets: DashMap::new(),
             iteration: 0,
             user_locked_nodes: Vec::new(),
+            score_cache,
         }
     }
 
@@ -71,12 +154,12 @@ impl Solver {
         self.user_locked_nodes = nodes;
     }
 
-    /// Run a single DCFR iteration
+    /// Run a single DCFR iteration using parallel reach-vector traversal.
+    /// OOP and IP hands are each parallelized via rayon.
     pub fn iterate(&mut self) {
         self.iteration += 1;
         let t = self.iteration as f64;
 
-        // Collect all hand pairs to iterate over
         let board = self.game_tree.board.clone();
         let board_mask: u64 = board.iter().fold(0u64, |m, &c| m | card_bit(c));
 
@@ -94,80 +177,112 @@ impl Solver {
             .map(|(&h, &f)| (h, f))
             .collect();
 
-        // For each OOP hand, traverse the tree with all IP hands
-        // This is the standard "range vs range" traversal approach
-        for &(oop_hand, oop_freq) in &oop_hands {
-            for &(ip_hand, ip_freq) in &ip_hands {
-                // Skip if hands conflict
-                if hands_conflict(oop_hand, ip_hand) { continue; }
+        // Parallel traversal — shared borrow of self via DashMap interior mutability
+        {
+            let this = &*self;
 
-                let dead_mask = board_mask | card_bit(oop_hand[0]) | card_bit(oop_hand[1])
-                    | card_bit(ip_hand[0]) | card_bit(ip_hand[1]);
+            // OOP traversal: each OOP hand in parallel
+            oop_hands.par_iter().for_each(|&(oop_hand, oop_freq)| {
+                let oop_mask = card_bit(oop_hand[0]) | card_bit(oop_hand[1]);
+                let ip_reach: Vec<([Card; 2], f64)> = ip_hands.iter()
+                    .filter(|&&(h, _)| (card_bit(h[0]) | card_bit(h[1])) & oop_mask == 0)
+                    .cloned()
+                    .collect();
+                if ip_reach.is_empty() { return; }
 
-                // OOP traversal
-                self.traverse(
-                    self.game_tree.root,
-                    Player::OOP,
-                    oop_hand,
-                    ip_hand,
-                    1.0 * oop_freq,
-                    1.0 * ip_freq,
-                    &board,
-                    dead_mask,
-                    t,
+                this.traverse_reach(
+                    this.game_tree.root, Player::OOP, oop_hand, oop_freq,
+                    &ip_reach, &board, t,
                 );
+            });
 
-                // IP traversal
-                self.traverse(
-                    self.game_tree.root,
-                    Player::IP,
-                    oop_hand,
-                    ip_hand,
-                    1.0 * oop_freq,
-                    1.0 * ip_freq,
-                    &board,
-                    dead_mask,
-                    t,
+            // IP traversal: each IP hand in parallel
+            ip_hands.par_iter().for_each(|&(ip_hand, ip_freq)| {
+                let ip_mask = card_bit(ip_hand[0]) | card_bit(ip_hand[1]);
+                let oop_reach: Vec<([Card; 2], f64)> = oop_hands.iter()
+                    .filter(|&&(h, _)| (card_bit(h[0]) | card_bit(h[1])) & ip_mask == 0)
+                    .cloned()
+                    .collect();
+                if oop_reach.is_empty() { return; }
+
+                this.traverse_reach(
+                    this.game_tree.root, Player::IP, ip_hand, ip_freq,
+                    &oop_reach, &board, t,
                 );
-            }
+            });
         }
 
         // Apply DCFR discounting
         self.apply_discounting(t);
     }
 
-    fn traverse(
-        &mut self,
+    /// Reach-vector traversal: traverse the tree once per traverser hand,
+    /// processing all opponent hands simultaneously via their reach vector.
+    /// Uses &self with DashMap for thread-safe concurrent access.
+    fn traverse_reach(
+        &self,
         node_id: usize,
         traverser: Player,
-        oop_hand: [Card; 2],
-        ip_hand: [Card; 2],
-        reach_oop: f64,
-        reach_ip: f64,
+        t_hand: [Card; 2],
+        t_reach: f64,
+        opp_reach: &[([Card; 2], f64)],
         board: &[Card],
-        dead_mask: u64,
         t: f64,
     ) -> f64 {
-        let node_kind = self.game_tree.nodes[node_id].kind.clone();
-
-        match node_kind {
+        let node = &self.game_tree.nodes[node_id];
+        match &node.kind {
             NodeKind::Terminal { pot, winner, saw_flop, .. } => {
-                self.compute_terminal_ev(
-                    &winner, pot, traverser, oop_hand, ip_hand, board,
-                    &self.game_tree.rake.clone(), saw_flop,
-                )
+                let rake = &self.game_tree.rake;
+                let rake_amount = if !*saw_flop && rake.no_flop_no_drop { 0.0 }
+                                  else { (*pot * rake.percentage).min(rake.cap) };
+                let net_pot = *pot - rake_amount;
+                let half_pot = net_pot / 2.0;
+
+                match winner {
+                    TerminalWinner::Showdown => {
+                        let bkey = board_to_key(board);
+                        let scores = self.score_cache.get(&bkey);
+                        let t_score = scores.and_then(|s| s.get(&t_hand).copied())
+                            .unwrap_or_else(|| best_hand(t_hand, board));
+                        showdown_ev_sorted(t_score, opp_reach, half_pot, scores, board)
+                    }
+                    _ => {
+                        let total_reach: f64 = opp_reach.iter().map(|&(_, r)| r).sum();
+                        let payoff = match (winner, traverser) {
+                            (TerminalWinner::OOP, Player::OOP) => half_pot,
+                            (TerminalWinner::OOP, Player::IP) => -half_pot,
+                            (TerminalWinner::IP, Player::IP) => half_pot,
+                            (TerminalWinner::IP, Player::OOP) => -half_pot,
+                            _ => 0.0,
+                        };
+                        payoff * total_reach
+                    }
+                }
             }
 
             NodeKind::Chance { children, .. } => {
-                // For now, use the single subtree child (card dealing handled externally)
-                if let Some((_, child_id)) = children.first() {
-                    self.traverse(
-                        *child_id, traverser, oop_hand, ip_hand,
-                        reach_oop, reach_ip, board, dead_mask, t,
-                    )
-                } else {
-                    0.0
+                let t_mask = card_bit(t_hand[0]) | card_bit(t_hand[1]);
+                let mut total_ev = 0.0;
+                let mut valid_count = 0u32;
+                for &(card, child_id) in children {
+                    let cmask = card_bit(card);
+                    if cmask & t_mask != 0 { continue; }
+                    let filtered: Vec<([Card; 2], f64)> = opp_reach.iter()
+                        .filter(|&&(h, _)| (card_bit(h[0]) | card_bit(h[1])) & cmask == 0)
+                        .cloned()
+                        .collect();
+                    if filtered.is_empty() { continue; }
+                    let blen = board.len();
+                    let mut eb = [0u8; 7];
+                    eb[..blen].copy_from_slice(board);
+                    eb[blen] = card;
+                    total_ev += self.traverse_reach(
+                        child_id, traverser, t_hand, t_reach,
+                        &filtered, &eb[..blen+1], t,
+                    );
+                    valid_count += 1;
                 }
+                if valid_count > 0 { total_ev / valid_count as f64 } else { 0.0 }
             }
 
             NodeKind::Action {
@@ -178,40 +293,31 @@ impl Solver {
                 locked_strategy,
                 ..
             } => {
-                let hand = if player == Player::OOP { oop_hand } else { ip_hand };
                 let n_actions = actions.len();
 
-                // Get or create info set
-                let key: InfoKey = (node_id, hand);
+                if *player == traverser {
+                    // Traverser's node: compute counterfactual values
+                    let key: InfoKey = (node_id, t_hand);
 
-                // Get current strategy
-                let strategy = if node_locked {
-                    locked_strategy
-                        .as_ref()
-                        .and_then(|map| map.get(&hand))
-                        .cloned()
-                        .unwrap_or_else(|| vec![1.0 / n_actions as f64; n_actions])
-                } else {
-                    if !self.info_sets.contains_key(&key) {
-                        self.info_sets.insert(key, InfoSetData::new(n_actions));
-                    }
-                    self.info_sets[&key].get_strategy()
-                };
+                    // Read strategy (DashMap guard dropped before recursion)
+                    let strategy = if *node_locked {
+                        locked_strategy
+                            .as_ref()
+                            .and_then(|map| map.get(&t_hand))
+                            .cloned()
+                            .unwrap_or_else(|| vec![1.0 / n_actions as f64; n_actions])
+                    } else {
+                        self.info_sets.entry(key)
+                            .or_insert_with(|| InfoSetData::new(n_actions))
+                            .get_strategy()
+                    };
 
-                if player == traverser {
-                    // Compute counterfactual values for each action
-                    let opponent_reach = if traverser == Player::OOP { reach_ip } else { reach_oop };
+                    // Recurse (no DashMap guards held)
                     let mut action_evs = vec![0.0f64; n_actions];
-
                     for (i, &child_id) in children.iter().enumerate() {
-                        let (new_reach_oop, new_reach_ip) = if traverser == Player::OOP {
-                            (reach_oop * strategy[i], reach_ip)
-                        } else {
-                            (reach_oop, reach_ip * strategy[i])
-                        };
-                        action_evs[i] = self.traverse(
-                            child_id, traverser, oop_hand, ip_hand,
-                            new_reach_oop, new_reach_ip, board, dead_mask, t,
+                        action_evs[i] = self.traverse_reach(
+                            child_id, traverser, t_hand, t_reach * strategy[i],
+                            opp_reach, board, t,
                         );
                     }
 
@@ -219,45 +325,62 @@ impl Solver {
                         .map(|(&ev, &s)| ev * s)
                         .sum();
 
-                    // Update regrets
-                    if !node_locked {
-                        let info = self.info_sets.entry(key).or_insert_with(|| InfoSetData::new(n_actions));
+                    // Write back regrets and cumulative strategy
+                    if !*node_locked {
+                        let mut info = self.info_sets.entry(key)
+                            .or_insert_with(|| InfoSetData::new(n_actions));
                         for i in 0..n_actions {
-                            let regret = opponent_reach * (action_evs[i] - node_ev);
-                            info.cumulative_regrets[i] += regret;
+                            info.cumulative_regrets[i] += action_evs[i] - node_ev;
                         }
-
-                        // Update cumulative strategy
-                        let my_reach = if traverser == Player::OOP { reach_oop } else { reach_ip };
                         for i in 0..n_actions {
-                            info.cumulative_strategy[i] += my_reach * strategy[i];
+                            info.cumulative_strategy[i] += t_reach * strategy[i];
                         }
                     }
 
                     node_ev
                 } else {
-                    // Opponent node: weight by opponent strategy
-                    let mut ev = 0.0f64;
-                    for (i, &child_id) in children.iter().enumerate() {
-                        let (new_reach_oop, new_reach_ip) = if player == Player::OOP {
-                            (reach_oop * strategy[i], reach_ip)
-                        } else {
-                            (reach_oop, reach_ip * strategy[i])
-                        };
-                        ev += strategy[i] * self.traverse(
-                            child_id, traverser, oop_hand, ip_hand,
-                            new_reach_oop, new_reach_ip, board, dead_mask, t,
-                        );
-                    }
+                    // Opponent's node: split reach by per-hand strategy
+                    let mut action_opp_reach: Vec<Vec<([Card; 2], f64)>> =
+                        vec![Vec::new(); n_actions];
 
-                    // Update cumulative strategy for opponent
-                    if !node_locked {
-                        let my_reach = if player == Player::OOP { reach_oop } else { reach_ip };
-                        if let Some(info) = self.info_sets.get_mut(&key) {
-                            for i in 0..n_actions {
-                                info.cumulative_strategy[i] += my_reach * strategy[i];
+                    for &(opp_hand, reach) in opp_reach {
+                        if reach <= 0.0 { continue; }
+
+                        let opp_key: InfoKey = (node_id, opp_hand);
+
+                        // Read strategy and update cumulative in one lock acquisition
+                        let strat = if *node_locked {
+                            locked_strategy
+                                .as_ref()
+                                .and_then(|m| m.get(&opp_hand))
+                                .cloned()
+                                .unwrap_or_else(|| vec![1.0 / n_actions as f64; n_actions])
+                        } else {
+                            let mut entry = self.info_sets.entry(opp_key)
+                                .or_insert_with(|| InfoSetData::new(n_actions));
+                            let s = entry.get_strategy();
+                            for a in 0..n_actions {
+                                entry.cumulative_strategy[a] += reach * s[a];
+                            }
+                            s
+                            // guard dropped here
+                        };
+
+                        for (a, &prob) in strat.iter().enumerate() {
+                            if prob > 0.0 {
+                                action_opp_reach[a].push((opp_hand, reach * prob));
                             }
                         }
+                    }
+
+                    // Recurse (no DashMap guards held)
+                    let mut ev = 0.0;
+                    for (a, &child_id) in children.iter().enumerate() {
+                        if action_opp_reach[a].is_empty() { continue; }
+                        ev += self.traverse_reach(
+                            child_id, traverser, t_hand, t_reach,
+                            &action_opp_reach[a], board, t,
+                        );
                     }
 
                     ev
@@ -266,60 +389,7 @@ impl Solver {
         }
     }
 
-    fn compute_terminal_ev(
-        &self,
-        winner: &TerminalWinner,
-        pot: f64,
-        traverser: Player,
-        oop_hand: [Card; 2],
-        ip_hand: [Card; 2],
-        board: &[Card],
-        rake: &RakeConfig,
-        saw_flop: bool,
-    ) -> f64 {
-        let rake_amount = if !saw_flop && rake.no_flop_no_drop {
-            0.0
-        } else {
-            (pot * rake.percentage).min(rake.cap)
-        };
-        let net_pot = pot - rake_amount;
-
-        match winner {
-            TerminalWinner::OOP => {
-                // IP folded, OOP wins
-                match traverser {
-                    Player::OOP => net_pot / 2.0,
-                    Player::IP => -net_pot / 2.0,
-                }
-            }
-            TerminalWinner::IP => {
-                // OOP folded, IP wins
-                match traverser {
-                    Player::OOP => -net_pot / 2.0,
-                    Player::IP => net_pot / 2.0,
-                }
-            }
-            TerminalWinner::Showdown => {
-                let score_oop = best_hand(oop_hand, board);
-                let score_ip = best_hand(ip_hand, board);
-                let half_pot = net_pot / 2.0;
-                match traverser {
-                    Player::OOP => {
-                        if score_oop > score_ip { half_pot }
-                        else if score_ip > score_oop { -half_pot }
-                        else { 0.0 }
-                    }
-                    Player::IP => {
-                        if score_ip > score_oop { half_pot }
-                        else if score_oop > score_ip { -half_pot }
-                        else { 0.0 }
-                    }
-                }
-            }
-        }
-    }
-
-    fn apply_discounting(&mut self, t: f64) {
+    fn apply_discounting(&self, t: f64) {
         let pos_weight = t.powf(ALPHA) / (t.powf(ALPHA) + 1.0);
         let neg_weight = if BETA >= 0.0 {
             t.powf(BETA) / (t.powf(BETA) + 1.0)
@@ -328,18 +398,18 @@ impl Solver {
         };
         let strat_weight = (t / (t + 1.0)).powf(GAMMA);
 
-        for info in self.info_sets.values_mut() {
-            for r in &mut info.cumulative_regrets {
+        self.info_sets.iter_mut().for_each(|mut entry| {
+            for r in &mut entry.cumulative_regrets {
                 if *r >= 0.0 {
                     *r *= pos_weight;
                 } else {
                     *r *= neg_weight;
                 }
             }
-            for s in &mut info.cumulative_strategy {
+            for s in &mut entry.cumulative_strategy {
                 *s *= strat_weight;
             }
-        }
+        });
     }
 
     /// Compute exploitability via best response traversal.
@@ -382,16 +452,14 @@ impl Solver {
         let mut total_weight = 0.0;
 
         for &(t_hand, t_freq) in &t_hands {
-            // Build initial opponent reach probabilities
-            let mut opp_reach: HashMap<[Card; 2], f64> = HashMap::new();
-            for &(o_hand, o_freq) in &o_hands {
-                if !hands_conflict(t_hand, o_hand) {
-                    opp_reach.insert(o_hand, o_freq);
-                }
-            }
+            let t_mask = card_bit(t_hand[0]) | card_bit(t_hand[1]);
+            let opp_reach: Vec<([Card; 2], f64)> = o_hands.iter()
+                .filter(|&&(h, _)| (card_bit(h[0]) | card_bit(h[1])) & t_mask == 0)
+                .cloned()
+                .collect();
             if opp_reach.is_empty() { continue; }
 
-            let opp_total: f64 = opp_reach.values().sum();
+            let opp_total: f64 = opp_reach.iter().map(|&(_, r)| r).sum();
             let br_val = self.br_traverse(
                 self.game_tree.root, traverser, t_hand, &opp_reach, board,
             );
@@ -404,56 +472,80 @@ impl Solver {
     }
 
     /// Best response traversal for a single traverser hand.
-    ///
-    /// - Traverser's nodes: pick the max-EV action (best response).
-    /// - Opponent's nodes: distribute opponent reach by their average strategy.
-    /// - Terminals: sum payoffs weighted by opponent reach.
+    /// Uses Vec-based opponent reach for cache-friendly processing.
     fn br_traverse(
         &self,
         node_id: usize,
         traverser: Player,
         t_hand: [Card; 2],
-        opp_reach: &HashMap<[Card; 2], f64>,
+        opp_reach: &[([Card; 2], f64)],
         board: &[Card],
     ) -> f64 {
         let node = &self.game_tree.nodes[node_id];
         match &node.kind {
             NodeKind::Terminal { winner, pot, saw_flop, .. } => {
                 let rake = &self.game_tree.rake;
-                let mut ev = 0.0;
-                for (&opp_hand, &reach) in opp_reach {
-                    if reach <= 0.0 { continue; }
-                    let (oop_h, ip_h) = match traverser {
-                        Player::OOP => (t_hand, opp_hand),
-                        Player::IP => (opp_hand, t_hand),
-                    };
-                    ev += reach * self.compute_terminal_ev(
-                        winner, *pot, traverser, oop_h, ip_h, board, rake, *saw_flop,
-                    );
+                let rake_amount = if !saw_flop && rake.no_flop_no_drop { 0.0 }
+                                  else { (*pot * rake.percentage).min(rake.cap) };
+                let net_pot = *pot - rake_amount;
+                let half_pot = net_pot / 2.0;
+
+                match winner {
+                    TerminalWinner::Showdown => {
+                        let bkey = board_to_key(board);
+                        let scores = self.score_cache.get(&bkey);
+                        let t_score = scores.and_then(|s| s.get(&t_hand).copied())
+                            .unwrap_or_else(|| best_hand(t_hand, board));
+                        showdown_ev_sorted(t_score, opp_reach, half_pot, scores, board)
+                    }
+                    _ => {
+                        let total_reach: f64 = opp_reach.iter().map(|&(_, r)| r).sum();
+                        let payoff = match (winner, traverser) {
+                            (TerminalWinner::OOP, Player::OOP) => half_pot,
+                            (TerminalWinner::OOP, Player::IP) => -half_pot,
+                            (TerminalWinner::IP, Player::IP) => half_pot,
+                            (TerminalWinner::IP, Player::OOP) => -half_pot,
+                            _ => 0.0,
+                        };
+                        payoff * total_reach
+                    }
                 }
-                ev
             }
 
             NodeKind::Chance { children, .. } => {
-                children.first()
-                    .map(|(_, cid)| self.br_traverse(*cid, traverser, t_hand, opp_reach, board))
-                    .unwrap_or(0.0)
+                let t_mask = card_bit(t_hand[0]) | card_bit(t_hand[1]);
+                let mut total_ev = 0.0;
+                let mut valid_count = 0u32;
+                for &(card, child_id) in children {
+                    let cmask = card_bit(card);
+                    if cmask & t_mask != 0 { continue; }
+                    let filtered: Vec<([Card; 2], f64)> = opp_reach.iter()
+                        .filter(|&&(h, _)| (card_bit(h[0]) | card_bit(h[1])) & cmask == 0)
+                        .cloned()
+                        .collect();
+                    if filtered.is_empty() { continue; }
+                    let blen = board.len();
+                    let mut eb = [0u8; 7];
+                    eb[..blen].copy_from_slice(board);
+                    eb[blen] = card;
+                    total_ev += self.br_traverse(child_id, traverser, t_hand, &filtered, &eb[..blen+1]);
+                    valid_count += 1;
+                }
+                if valid_count > 0 { total_ev / valid_count as f64 } else { 0.0 }
             }
 
             NodeKind::Action { player, actions, children, node_locked, locked_strategy, .. } => {
                 let n_actions = actions.len();
 
                 if *player == traverser {
-                    // Best response: pick the action with maximum EV
                     children.iter()
                         .map(|&cid| self.br_traverse(cid, traverser, t_hand, opp_reach, board))
                         .fold(f64::NEG_INFINITY, f64::max)
                 } else {
-                    // Opponent's node: split reach by opponent's per-hand strategy
-                    let mut action_reach: Vec<HashMap<[Card; 2], f64>> =
-                        vec![HashMap::new(); n_actions];
+                    let mut action_reach: Vec<Vec<([Card; 2], f64)>> =
+                        vec![Vec::new(); n_actions];
 
-                    for (&opp_hand, &reach) in opp_reach {
+                    for &(opp_hand, reach) in opp_reach {
                         if reach <= 0.0 { continue; }
 
                         let strat = if *node_locked {
@@ -469,7 +561,7 @@ impl Solver {
 
                         for (a, &prob) in strat.iter().enumerate() {
                             if prob > 0.0 {
-                                *action_reach[a].entry(opp_hand).or_insert(0.0) += reach * prob;
+                                action_reach[a].push((opp_hand, reach * prob));
                             }
                         }
                     }
@@ -486,9 +578,12 @@ impl Solver {
     /// Extract solution: average strategies for all info sets
     pub fn extract_strategies(&self) -> HashMap<(usize, String), Vec<f64>> {
         let mut result = HashMap::new();
-        for (&(node_id, hand), info) in &self.info_sets {
-            let key = (node_id, crate::cards::hand_to_string(hand));
-            result.insert(key, info.get_average_strategy());
+        for entry in self.info_sets.iter() {
+            let &(node_id, hand) = entry.key();
+            result.insert(
+                (node_id, crate::cards::hand_to_string(hand)),
+                entry.value().get_average_strategy(),
+            );
         }
         result
     }
@@ -583,9 +678,10 @@ impl Solver {
                     continue;
                 }
                 let mut hand_strats: HashMap<[Card; 2], Vec<f64>> = HashMap::new();
-                for (&(nid, hand), info) in &self.info_sets {
+                for entry in self.info_sets.iter() {
+                    let &(nid, hand) = entry.key();
                     if nid == node_id {
-                        hand_strats.insert(hand, info.get_average_strategy());
+                        hand_strats.insert(hand, entry.value().get_average_strategy());
                     }
                 }
                 if !hand_strats.is_empty() {
@@ -623,10 +719,6 @@ impl Solver {
     }
 }
 
-fn hands_conflict(h1: [Card; 2], h2: [Card; 2]) -> bool {
-    h1[0] == h2[0] || h1[0] == h2[1] || h1[1] == h2[0] || h1[1] == h2[1]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +737,8 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![parse_card("Ah").unwrap()],
+            vec![parse_card("2s").unwrap()],
         );
         let oop_range = parse_range("AA,KK,QQ,AKs,AKo");
         let ip_range = parse_range("AA,KK,QQ,AKs,AKo");
@@ -669,6 +763,8 @@ mod tests {
             100.0, 6.5, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![parse_card("Jc").unwrap()],
+            vec![parse_card("2s").unwrap()],
         );
 
         // Lock Turn node after check-check: OOP always checks with AsAh
@@ -739,6 +835,7 @@ mod tests {
             100.0, 10.0, board,
             FullBetSizeConfig::default(),
             RakeConfig::default(),
+            vec![], vec![],
         );
         let oop_range = parse_range("AA,QQ");
         let ip_range = parse_range("KK,JJ");
