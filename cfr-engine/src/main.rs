@@ -221,9 +221,9 @@ fn build_solution_node(solver: &Solver, node_id: usize) -> SolutionNode {
                 ev_map.insert(hand_to_string(hand), 0.0);
             }
 
-            // Build children (limit depth for output size)
+            // Build children
             let mut children_map = std::collections::HashMap::new();
-            for (action, &child_id) in actions.iter().zip(children.iter()).take(3) {
+            for (action, &child_id) in actions.iter().zip(children.iter()) {
                 let child_node = build_solution_node(solver, child_id);
                 children_map.insert(action.to_string(), child_node);
             }
@@ -244,8 +244,22 @@ fn build_solution_node(solver: &Solver, node_id: usize) -> SolutionNode {
             };
             SolutionNode::empty(player_str)
         }
-        NodeKind::Chance { .. } => {
-            SolutionNode::empty("chance")
+        NodeKind::Chance { children: chance_children, .. } => {
+            let mut children_map = std::collections::HashMap::new();
+            let mut card_names = Vec::new();
+            for &(card, child_id) in chance_children {
+                let card_str = cards::card_to_string(card);
+                card_names.push(card_str.clone());
+                let child_node = build_solution_node(solver, child_id);
+                children_map.insert(card_str, child_node);
+            }
+            SolutionNode {
+                player: "chance".to_string(),
+                actions: card_names,
+                strategy: std::collections::HashMap::new(),
+                ev: std::collections::HashMap::new(),
+                children: children_map,
+            }
         }
     }
 }

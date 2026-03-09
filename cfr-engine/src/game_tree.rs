@@ -58,29 +58,29 @@ pub struct BetSizeConfig {
 impl BetSizeConfig {
     pub fn default_flop() -> Self {
         BetSizeConfig {
-            ip_bet: vec![0.33, 0.67, 1.0],
-            oop_bet: vec![0.33, 0.67, 1.0],
-            ip_raise: vec![2.5, 4.0],
-            oop_raise: vec![2.5, 4.0],
-            oop_donk: vec![0.33, 0.67],
+            ip_bet: vec![0.33, 0.67],
+            oop_bet: vec![0.33, 0.67],
+            ip_raise: vec![2.5],
+            oop_raise: vec![2.5],
+            oop_donk: vec![],
         }
     }
     pub fn default_turn() -> Self {
         BetSizeConfig {
-            ip_bet: vec![0.5, 0.75, 1.0],
-            oop_bet: vec![0.5, 0.75, 1.0],
-            ip_raise: vec![2.5, 3.5],
-            oop_raise: vec![2.5, 3.5],
-            oop_donk: vec![0.5, 0.75],
+            ip_bet: vec![0.67, 1.0],
+            oop_bet: vec![0.67, 1.0],
+            ip_raise: vec![2.5],
+            oop_raise: vec![2.5],
+            oop_donk: vec![],
         }
     }
     pub fn default_river() -> Self {
         BetSizeConfig {
-            ip_bet: vec![0.5, 0.75, 1.0, 1.5],
-            oop_bet: vec![0.5, 0.75, 1.0, 1.5],
+            ip_bet: vec![0.67, 1.0],
+            oop_bet: vec![0.67, 1.0],
             ip_raise: vec![2.5],
             oop_raise: vec![2.5],
-            oop_donk: vec![0.75, 1.0],
+            oop_donk: vec![],
         }
     }
 }
@@ -510,8 +510,6 @@ impl GameTree {
         if facing_bet {
             // Can fold, call, raise
             actions.push(ActionKind::Fold);
-
-            let call_amount = last_bet.min(player_stack);
             actions.push(ActionKind::Call);
 
             // Raises
@@ -519,23 +517,29 @@ impl GameTree {
                 Player::IP => &cfg.ip_raise,
                 Player::OOP => &cfg.oop_raise,
             };
+            let mut has_raise = false;
+            let mut max_raise_size = 0.0f64;
             for &frac in raise_sizes {
                 let raise_size = pot * frac;
                 if raise_size < player_stack && raise_size > last_bet * 2.0 {
                     actions.push(ActionKind::Raise(frac));
+                    has_raise = true;
+                    max_raise_size = max_raise_size.max(raise_size);
                 }
             }
-            // All-in if meaningful
-            if player_stack > last_bet * 2.0 {
-                actions.push(ActionKind::AllIn);
+            // All-in: only if no raises fit, or allin is within 3x of max raise
+            if player_stack > last_bet {
+                if !has_raise {
+                    actions.push(ActionKind::AllIn);
+                } else if player_stack <= max_raise_size * 3.0 {
+                    actions.push(ActionKind::AllIn);
+                }
             }
         } else {
             // Can check or bet
             actions.push(ActionKind::Check);
 
             let bet_sizes = if player == Player::OOP && last_bet == 0.0 {
-                // OOP donk bet option (only when IP hasn't bet yet this street)
-                // For simplicity, we use oop_bet here; donk is separate in full impl
                 &cfg.oop_bet
             } else if player == Player::IP {
                 &cfg.ip_bet
@@ -543,14 +547,23 @@ impl GameTree {
                 &cfg.oop_bet
             };
 
+            let mut has_bet = false;
+            let mut max_bet_size = 0.0f64;
             for &frac in bet_sizes {
                 let bet_size = pot * frac;
                 if bet_size < player_stack {
                     actions.push(ActionKind::Bet(frac));
+                    has_bet = true;
+                    max_bet_size = max_bet_size.max(bet_size);
                 }
             }
+            // All-in: only if no bets fit, or allin is within 3x of max bet
             if player_stack > 0.0 {
-                actions.push(ActionKind::AllIn);
+                if !has_bet {
+                    actions.push(ActionKind::AllIn);
+                } else if player_stack <= max_bet_size * 3.0 {
+                    actions.push(ActionKind::AllIn);
+                }
             }
         }
 

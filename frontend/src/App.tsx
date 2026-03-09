@@ -14,6 +14,8 @@ import { useAuthStore } from './store/authStore';
 import { useWebSocket } from './hooks/useWebSocket';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  // DEV: auth bypass — remove before production
+  if (import.meta.env.DEV) return <>{children}</>;
   const { isAuthenticated } = useAuthStore();
   if (!isAuthenticated) return <Navigate to="/login" />;
   return <>{children}</>;

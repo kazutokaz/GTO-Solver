@@ -10,6 +10,8 @@ const solveRequestSchema = z.object({
     stackSize: z.number().positive(),
     potSize: z.number().positive(),
     board: z.array(z.string()).min(3).max(5),
+    turnCards: z.array(z.string()).max(5).optional(),
+    riverCards: z.array(z.string()).max(5).optional(),
     oopRange: z.string().min(1),
     ipRange: z.string().min(1),
   }),
@@ -54,6 +56,8 @@ export async function solveRoutes(app: FastifyInstance) {
         stack_size: body.game.stackSize,
         pot_size: body.game.potSize,
         board: body.game.board,
+        turn_cards: body.game.turnCards || undefined,
+        river_cards: body.game.riverCards || undefined,
         players: {
           oop: { range: body.game.oopRange },
           ip: { range: body.game.ipRange },

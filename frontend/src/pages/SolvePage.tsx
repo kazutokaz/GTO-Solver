@@ -8,14 +8,16 @@ import { useSolveStore } from '../store/solveStore';
 
 export function SolvePage() {
   const {
-    stackSize, potSize, board, oopRange, ipRange, betSizes, rake,
+    stackSize, potSize, board, turnCards, riverCards, oopRange, ipRange, betSizes, rake,
+    nodeLocks,
     status, result, error, jobId,
-    setBoard, setOopRange, setIpRange, setStackSize, setPotSize,
+    setBoard, setTurnCards, setRiverCards, setOopRange, setIpRange, setStackSize, setPotSize,
     setBetSizes, setRake,
+    addNodeLock, removeNodeLock, clearNodeLocks,
     submitSolve, reset,
   } = useSolveStore();
 
-  const canSubmit = board.length >= 3 && oopRange && ipRange && status === 'idle';
+  const canSubmit = board.length >= 3 && oopRange && ipRange && (status === 'idle' || status === 'completed' || status === 'failed');
 
   return (
     <div className="max-w-6xl mx-auto p-4">
@@ -47,7 +49,10 @@ export function SolvePage() {
           </div>
 
           {/* Board */}
-          <BoardPicker board={board} onChange={setBoard} />
+          <BoardPicker
+            board={board} turnCards={turnCards} riverCards={riverCards}
+            onChange={setBoard} onTurnCardsChange={setTurnCards} onRiverCardsChange={setRiverCards}
+          />
 
           {/* Ranges */}
           <div className="grid grid-cols-2 gap-4">
@@ -61,6 +66,31 @@ export function SolvePage() {
             <RakeConfig value={rake} onChange={setRake} />
           </div>
 
+          {/* Node Locks indicator */}
+          {nodeLocks.length > 0 && (
+            <div className="p-2 rounded text-xs" style={{ background: '#ffad1f15', border: '1px solid #ffad1f44' }}>
+              <div className="flex items-center justify-between">
+                <span style={{ color: '#ffad1f' }}>
+                  {'\uD83D\uDD12'} {nodeLocks.length} node lock{nodeLocks.length > 1 ? 's' : ''} active
+                </span>
+                <button
+                  className="px-2 py-0.5 rounded"
+                  style={{ background: '#e0245e33', color: '#e0245e' }}
+                  onClick={clearNodeLocks}
+                >
+                  Clear all
+                </button>
+              </div>
+              <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>
+                {nodeLocks.map((lock, i) => (
+                  <div key={i}>
+                    [{lock.actionPath.join(' \u2192 ') || 'root'}] {Object.keys(lock.handStrategies).length} combos locked
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Submit */}
           <div className="flex gap-3 items-center">
             <button
@@ -71,9 +101,9 @@ export function SolvePage() {
                 cursor: canSubmit ? 'pointer' : 'not-allowed',
               }}
               disabled={!canSubmit}
-              onClick={submitSolve}
+              onClick={() => { reset(); submitSolve(); }}
             >
-              Solve
+              {nodeLocks.length > 0 ? 'Re-Solve with Locks' : 'Solve'}
             </button>
 
             {status !== 'idle' && (
@@ -122,7 +152,12 @@ export function SolvePage() {
                     Game Tree
                   </h3>
                   {result.result.children ? (
-                    <GameTreeNav root={result.result} />
+                    <GameTreeNav
+                      root={result.result}
+                      nodeLocks={nodeLocks}
+                      onNodeLock={addNodeLock}
+                      onRemoveNodeLock={removeNodeLock}
+                    />
                   ) : (
                     <>
                       <div className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
@@ -131,6 +166,7 @@ export function SolvePage() {
                       <StrategyMatrix
                         strategy={result.result.strategy || {}}
                         actions={result.result.actions || []}
+                        ev={result.result.ev}
                       />
                     </>
                   )}
